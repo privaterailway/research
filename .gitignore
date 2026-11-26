@@ -1,0 +1,10 @@
+.idea/
+.venv/
+.vscode/
+_dataset/
+__pycache__
+/venv/
+/runs/
+*.pth
+/outputs/
+/results/

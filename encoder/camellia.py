@@ -1,0 +1,34 @@
+from . import Encoder
+from cryptography.hazmat.primitives.ciphers import Cipher, modes
+from cryptography.hazmat.backends import default_backend
+
+# In newer versions of `cryptography` Camellia lives in `decrepit`; older ones keep it in `algorithms`.
+try:
+    from cryptography.hazmat.decrepit.ciphers.algorithms import Camellia
+except ImportError:  # pragma: no cover
+    from cryptography.hazmat.primitives.ciphers.algorithms import Camellia
+
+
+class CamelliaEncoder(Encoder):
+    """Camellia-256, CBC mode, 128-bit block."""
+
+    def __init__(self):
+        self.backend = default_backend()
+        self.encryptor = None
+
+    def encrypt(self, text: bytes) -> bytes:
+        assert len(text) % 16 == 0, "Text length must be a multiple of 16 bytes for Camellia"
+
+        if self.encryptor is None:
+            cipher = Cipher(Camellia(self.key), modes.CBC(self.iv), backend=self.backend)
+            self.encryptor = cipher.encryptor()
+
+        return self.encryptor.update(text) + self.encryptor.finalize()
+
+    def generate_key(self, key: bytes):
+        self.key = key[:32]
+        self.encryptor = None
+
+    def generate_iv(self, iv: bytes):
+        self.iv = iv[:16]
+        self.encryptor = None
