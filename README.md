@@ -22,11 +22,9 @@ concatenated with the transformer output (`USE_FEATURES` in `config.py`; z-score
 | G4 serial dependence | byte autocorrelation at lags 1–32, bigram chi² (overlapping and aligned) |
 | G5 block structure | for b ∈ {8, 16}: repeated aligned blocks, distinct blocks, mean Hamming distance between consecutive blocks; inferred block size |
 
-`datagen.py` leakage fixes: (1) a fresh random IV/nonce for every sample (previously one IV for the whole dataset, so
-samples of a key group were near-duplicate ciphertexts and stream ciphers reused their keystream); (2) keys generated
-independently per cipher (previously every cipher used the same key bytes); (3) fresh random plaintext per sample
-(previously a counter, identical across classes); (4) RC4, which has no IV, derives its per-message key as
-SHA-256(key ‖ IV). Regenerate the dataset (`rm -rf _dataset && ./datagen.py`) before training.
+`datagen.py` leakage fixes: (1) keys are generated independently per cipher (previously every cipher used the same
+key bytes); (2) fresh random plaintext per sample (previously a counter, identical across classes). The single
+dataset-wide IV is kept as in the original setup. Regenerate the dataset (`rm -rf _dataset && ./datagen.py`) before training.
 
 ## ➕ Supported Algorithms (16 classes)
 
@@ -273,5 +271,4 @@ outputs/
 
 `plot_accuracy.py` and `plot_confusion.py` re-draw figures from the saved outputs.
 Metrics: accuracy (95% Wilson CI), balanced accuracy, macro precision/recall/F1, MCC, Cohen's kappa, top-3 accuracy, macro ROC-AUC.
-"# research" 
 "# research" 

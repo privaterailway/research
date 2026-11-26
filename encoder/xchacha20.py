@@ -19,7 +19,6 @@ class XChaCha20Encoder(Encoder):
         self.cipher_obj = None
 
     def generate_iv(self, iv: bytes):
-        # XChaCha20 needs a 24-byte nonce; datagen supplies a 32-byte random IV.
-        assert len(iv) >= 24, "XChaCha20 needs an IV of at least 24 bytes"
-        self.iv = iv[:24]
+        # The shared IV is 16 bytes, XChaCha20 needs a 24-byte nonce: stretch it deterministically.
+        self.iv = (iv + iv)[:24]
         self.cipher_obj = None

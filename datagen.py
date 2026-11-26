@@ -14,7 +14,7 @@ QUANTITY = 1024  # Количество шифротекста на каждый
 TEXT_SIZE = 1024  # Размер текста в байтах
 KEY_REUSE_EVERY = 8  # One key is shared by this many consecutive samples of a class (key group = `key_id`)
 KEY_SIZE = 32  # bytes; every encoder truncates to the size it needs
-IV_SIZE = 32  # bytes; every encoder truncates to the size it needs (max needed: 24 for XChaCha20)
+IV_SIZE = 16  # bytes; every encoder truncates to the size it needs
 
 
 def parse_args():
@@ -46,6 +46,9 @@ def main():
     if not isdir(DATASET_DIR):
         mkdir(DATASET_DIR)
 
+    # One IV for the whole dataset (same as the original setup)
+    IV = os.urandom(IV_SIZE)
+
     for enc_name in selected:
         enc_factory = ENCODER_FACTORY[enc_name]
         dir_path = join(DATASET_DIR, enc_name)
@@ -68,15 +71,11 @@ def main():
         for i in tqdm(range(QUANTITY), desc=f"[{enc_name}] Generating", unit="item"):
             key_id = i // KEY_REUSE_EVERY
 
-            # A fresh random IV / nonce for EVERY sample: no (key, IV) pair is ever reused, so
-            # ciphertexts of one key group are not near-duplicates and no keystream is reused.
-            iv = os.urandom(IV_SIZE)
-
             # A fresh random plaintext for every sample and every cipher: samples are neither
             # shared between classes nor structured (the old counter plaintext was ~all zeros).
             text = os.urandom(TEXT_SIZE)
 
-            encoder.generate(keys[key_id], iv)
+            encoder.generate(keys[key_id], IV)
             ciphertext = encoder.encrypt(text)
 
             # Save the ciphertext (only the key group id is stored in the file name)
