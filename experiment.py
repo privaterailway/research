@@ -21,7 +21,6 @@ import reporting
 import splits
 from config import get_configuration
 from dataset import Dataset
-from features import NUM_FEATURES
 from model import CipherClassifier
 
 
@@ -101,15 +100,17 @@ def run_scenario(scenario, seed=None, epochs=None, output_dir=None, dataset_path
     # ------------------------------------------------------------------ data + split
     dataset_path = abspath(dataset_path or cfg.get('DATASET_PATH', '_dataset'))
     log.info(f"Loading dataset from: {dataset_path}")
-    use_features = bool(cfg.get('USE_FEATURES', True))
-    full = Dataset(root=dataset_path, use_features=use_features)
+    use_features = bool(cfg.get('USE_STAT_FEATURES', True))
+    use_bytes = bool(cfg.get('USE_BYTE_SEQUENCE', True))
+    feature_groups = list(cfg.get('FEATURE_GROUPS', ['G1', 'G2', 'G3', 'G4', 'G5']))
+    if not use_features and not use_bytes:
+        raise ValueError("Enable USE_STAT_FEATURES and/or USE_BYTE_SEQUENCE in config.py")
+    full = Dataset(root=dataset_path, use_features=use_features, feature_groups=feature_groups)
     class_names = full.classes
     num_classes = len(class_names)
 
     train_idx, val_idx, test_idx = splits.make_splits(
         full, scenario, cfg['TRAIN_RATIO'], cfg['VAL_RATIO'], cfg['TEST_RATIO'], seed)
-    # Feature normalisation statistics come from the TRAIN split only (no val/test leakage)
-    full.set_feature_norm(train_idx)
     summary = splits.split_summary(full, train_idx, val_idx, test_idx)
     reporting.write_json(summary, join(out_dir, 'split_summary.json'))
     splits.save_split_manifest(full, train_idx, val_idx, test_idx, join(out_dir, 'split_manifest.json'))
@@ -130,10 +131,20 @@ def run_scenario(scenario, seed=None, epochs=None, output_dir=None, dataset_path
     train_eval_loader = DataLoader(Subset(full, train_idx), batch_size=batch_size, shuffle=False,
                                    num_workers=0, pin_memory=pin)
 
+    # z-score the statistical features with TRAIN-subset statistics only (no leakage into val/test)
+    scaler = full.standardize_features(train_idx)
+    num_features = full.features.shape[1]
+    if scaler is not None:
+        np.savez_compressed(join(out_dir, 'feature_scaler.npz'), mean=scaler[0], std=scaler[1],
+                            names=np.array(full.feature_names))
+        reporting.write_json(full.feature_names, join(out_dir, 'feature_names.json'))
+        log.info(f"Statistical features: {num_features} ({', '.join(full.feature_groups)})")
+    log.info(f"Byte-sequence branch: {'on' if use_bytes else 'off'}")
+
     # ------------------------------------------------------------------ model
     model = CipherClassifier(num_classes=num_classes, d_model=d_model, hidden=hidden,
                              num_layers=num_layers, dropout=dropout,
-                             num_features=NUM_FEATURES if use_features else 0).to(device)
+                             num_features=num_features, use_bytes=use_bytes).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg['LEARNING_RATE']),
                                   weight_decay=float(cfg['WEIGHT_DECAY']))
@@ -143,9 +154,10 @@ def run_scenario(scenario, seed=None, epochs=None, output_dir=None, dataset_path
         'scenario': scenario, 'seed': seed, 'epochs': epochs, 'batch_size': batch_size,
         'learning_rate': cfg['LEARNING_RATE'], 'weight_decay': cfg['WEIGHT_DECAY'],
         'd_model': d_model, 'hidden': hidden, 'num_layers': num_layers, 'dropout': dropout,
+        'use_byte_sequence': use_bytes, 'use_stat_features': use_features,
+        'feature_groups': list(full.feature_groups) if use_features else [], 'num_stat_features': num_features,
         'optimizer': 'AdamW', 'model_selection': 'lowest validation loss',
         'split_ratios': [cfg['TRAIN_RATIO'], cfg['VAL_RATIO'], cfg['TEST_RATIO']],
-        'use_features': use_features, 'num_features': NUM_FEATURES if use_features else 0,
         'num_classes': num_classes, 'classes': class_names, 'trainable_parameters': n_params,
         'device': str(device), 'torch_version': torch.__version__,
     }

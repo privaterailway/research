@@ -10,7 +10,14 @@ def get_configuration():
         'SEQUENCE_LENGTH': 8,
         'DEVICE': 'cuda' if torch.cuda.is_available() else 'cpu',
         'BYTES_QUANTITY': 256,
-        'USE_FEATURES': True,  # add hand-crafted G1-G5 statistical features to the model
+
+        # ---- model inputs ----
+        # Statistical features (see features.py):
+        #   G1 byte distribution, G2 entropy/compressibility, G3 NIST SP 800-22 p-values,
+        #   G4 serial dependence, G5 block structure.
+        'USE_STAT_FEATURES': True,
+        'FEATURE_GROUPS': ['G1', 'G2', 'G3', 'G4', 'G5'],   # drop entries for ablations
+        'USE_BYTE_SEQUENCE': True,                          # False -> statistical features only
 
         # ---- split / output settings ----
         'SEED': 42,

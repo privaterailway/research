@@ -1,31 +1,35 @@
 import hashlib
 import re
-from os import listdir, stat
+from os import listdir
 from os.path import exists, join
 
 import numpy as np
 import torch
-from loguru import logger as log
 from torch.utils.data import Dataset as TorchDataset
+from tqdm import tqdm
 
+import features as feat
 from encoder import ENCODER_FACTORY
-from features import NUM_FEATURES, extract_features
 
 
 class Dataset(TorchDataset):
     """Ciphertext dataset. Every .bin file is one sample, the folder name is the class.
 
     All files are read once and cached in memory (the whole dataset is only a few MB).
+
+    Each item is ``(raw_bytes [L], statistical_features [F], label)``. The statistical
+    features (groups G1-G5, see ``features.py``) are computed once and cached next to the
+    data (``<root>/.features_<groups>.npz``). If ``use_features=False`` then F = 0.
+
+    The features are stored *raw*. Call ``standardize_features(train_idx)`` after the split
+    is known: it z-scores them with statistics of the training subset only (no leakage).
     """
 
-    def __init__(self, root="_dataset", use_features=True):
+    def __init__(self, root="_dataset", use_features=True, feature_groups=None, cache_features=True):
         self.samples = []  # (file_path, label, key_id)
         self.classes = sorted(ENCODER_FACTORY.keys())
-        self.use_features = use_features
-        self.root = root
 
         data, labels, key_ids, raws = [], [], [], []
-        sig = hashlib.sha256()
         for cipher_name in self.classes:
             class_path = join(root, cipher_name)
             for filename in sorted(listdir(class_path)):
@@ -39,12 +43,8 @@ class Dataset(TorchDataset):
                 key_id = int(match.group(1)) if match else -1
                 label = self.classes.index(cipher_name)
 
-                st = stat(fp)
-                sig.update(f"{fp}|{st.st_size}|{st.st_mtime_ns}".encode())
-
                 self.samples.append((fp, label, key_id))
-                if use_features:
-                    raws.append(raw)
+                raws.append(raw)
                 data.append(torch.tensor(list(raw), dtype=torch.long))
                 labels.append(label)
                 key_ids.append(key_id)
@@ -53,51 +53,63 @@ class Dataset(TorchDataset):
         self.labels = torch.tensor(labels, dtype=torch.long)
         self.key_ids = torch.tensor(key_ids, dtype=torch.long)
 
-        # Hand-crafted features G1-G5 (raw, un-normalised). They are normalised later with
-        # statistics of the TRAIN split only (see set_feature_norm) to avoid leakage.
-        self.features = None
-        if use_features:
-            self.features = torch.from_numpy(self._load_or_compute_features(raws, sig.hexdigest()))
-        self._feat_mean = None
-        self._feat_std = None
+        # ---- statistical features
+        self.use_features = bool(use_features)
+        self.feature_groups = tuple(feature_groups) if feature_groups else feat.GROUPS
+        if self.use_features:
+            self.feature_names = feat.get_feature_names(self.feature_groups)
+            self.features = torch.from_numpy(self._load_or_compute_features(root, raws, cache_features))
+        else:
+            self.feature_names = []
+            self.features = torch.zeros((len(self.samples), 0), dtype=torch.float32)
 
-    def _load_or_compute_features(self, raws, signature):
-        cache = join(self.root, ".features_cache.npz")
-        if exists(cache):
+    # ------------------------------------------------------------------ features
+    def _load_or_compute_features(self, root, raws, use_cache):
+        digest = hashlib.sha1()
+        for raw in raws:
+            digest.update(raw)
+        digest = f"v{feat.FEATURE_VERSION}:{digest.hexdigest()}"
+        cache_path = join(root, f".features_{'-'.join(self.feature_groups)}.npz")
+
+        if use_cache and exists(cache_path):
             try:
-                z = np.load(cache)
-                if str(z["signature"]) == signature and z["features"].shape == (len(raws), NUM_FEATURES):
-                    log.info(f"Loaded cached features from {cache}")
-                    return z["features"].astype(np.float32)
+                z = np.load(cache_path, allow_pickle=False)
+                if str(z['digest']) == digest and z['features'].shape == (len(raws), len(self.feature_names)):
+                    return z['features'].astype(np.float32)
             except Exception:
-                pass
-        log.info(f"Computing {NUM_FEATURES} features (G1-G5) for {len(raws)} samples ...")
-        feats = np.stack([extract_features(r) for r in raws]).astype(np.float32)
-        try:
-            np.savez_compressed(cache, features=feats, signature=np.array(signature))
-        except OSError:
-            pass
-        return feats
+                pass  # corrupt / stale cache -> recompute
 
-    def set_feature_norm(self, train_indices):
-        """Z-score the features using mean/std of the training samples only."""
-        if self.features is None:
-            return
-        tr = self.features[list(train_indices)]
-        self._feat_mean = tr.mean(dim=0)
-        self._feat_std = tr.std(dim=0).clamp_min(1e-6)
+        rows = [feat.extract_features(raw, self.feature_groups)
+                for raw in tqdm(raws, desc="Extracting statistical features", unit="sample")]
+        matrix = np.stack(rows).astype(np.float32)
 
+        if use_cache:
+            try:
+                np.savez_compressed(cache_path, features=matrix, digest=np.array(digest))
+            except OSError:
+                pass  # read-only dataset folder: just skip caching
+        return matrix
+
+    def standardize_features(self, train_idx):
+        """z-score the features with mean / std of the training subset; clip to [-10, 10].
+
+        Returns (mean, std) as numpy arrays (or None if there are no features).
+        """
+        if self.features.shape[1] == 0:
+            return None
+        train = self.features[torch.as_tensor(list(train_idx), dtype=torch.long)]
+        mean = train.mean(dim=0)
+        std = train.std(dim=0)
+        std = torch.where(std < 1e-8, torch.ones_like(std), std)  # constant feature -> 0 after centering
+        self.features = ((self.features - mean) / std).clamp(-10.0, 10.0)
+        return mean.numpy(), std.numpy()
+
+    # ------------------------------------------------------------------ torch API
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        if self.features is None:
-            feat = torch.zeros(0)
-        else:
-            feat = self.features[idx]
-            if self._feat_mean is not None:
-                feat = (feat - self._feat_mean) / self._feat_std
-        return self.data[idx], feat, int(self.labels[idx])
+        return self.data[idx], self.features[idx], int(self.labels[idx])
 
     def get_key_id(self, idx):
         """Return key_id for sample at index idx"""

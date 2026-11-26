@@ -9,23 +9,6 @@ Source code for the paper **"Ciphertext-Only Classification of Encryption Algori
 
 This repository contains the complete implementation of a deep learning approach for identifying encryption algorithms (AES, 3DES, Blowfish, Kuznyechik, plus Camellia, SM4, SEED, CAST5, DES, RC2, Magma, AES-CTR, ChaCha20, XChaCha20, Salsa20 and RC4) from ciphertext-only data. The study demonstrates that classification accuracy depends critically on cryptographic parameter reuse: under key reuse, the model achieves 96.09% accuracy, but under proper key rotation, accuracy collapses to 33.33% (random baseline), validating the security of modern block ciphers under correct key management.
 
-## 🧪 Hand-crafted features (G1–G5) and dataset-generation fixes
-
-`features.py` computes 316 statistical features per ciphertext, which are fed to a small MLP branch that is
-concatenated with the transformer output (`USE_FEATURES` in `config.py`; z-scored with **train-split statistics only**):
-
-| Group | Features |
-|-------|----------|
-| G1 byte distribution | 256-bin histogram, chi² vs uniform, mean / variance / skewness / kurtosis |
-| G2 entropy & compressibility | Shannon entropy (Miller–Madow), Rényi-2, min-entropy, zlib and LZMA ratios |
-| G3 bit-level randomness | NIST SP 800-22 p-values: frequency, block frequency, runs, longest run, cumulative sums (forward + backward), approximate entropy |
-| G4 serial dependence | byte autocorrelation at lags 1–32, bigram chi² (overlapping and aligned) |
-| G5 block structure | for b ∈ {8, 16}: repeated aligned blocks, distinct blocks, mean Hamming distance between consecutive blocks; inferred block size |
-
-`datagen.py` leakage fixes: (1) keys are generated independently per cipher (previously every cipher used the same
-key bytes); (2) fresh random plaintext per sample (previously a counter, identical across classes). The single
-dataset-wide IV is kept as in the original setup. Regenerate the dataset (`rm -rf _dataset && ./datagen.py`) before training.
-
 ## ➕ Supported Algorithms (16 classes)
 
 The original four ciphers were extended with 12 additional algorithms. They all implement the same `Encoder`
@@ -271,4 +254,40 @@ outputs/
 
 `plot_accuracy.py` and `plot_confusion.py` re-draw figures from the saved outputs.
 Metrics: accuracy (95% Wilson CI), balanced accuracy, macro precision/recall/F1, MCC, Cohen's kappa, top-3 accuracy, macro ROC-AUC.
-"# research" 
+
+## 📐 Statistical Features (hybrid model)
+
+In addition to the raw byte sequence, the classifier can use hand-crafted statistical features
+(`features.py`, computed once per sample and cached in `_dataset/.features_*.npz`):
+
+| Group | Features | Dim |
+|-------|----------|-----|
+| **G1** Byte distribution | 256-bin byte histogram, χ² vs. uniform, mean / variance / skewness / excess kurtosis | 261 |
+| **G2** Entropy & compressibility | Shannon entropy (Miller–Madow corrected), Rényi order-2 entropy, min-entropy, zlib ratio, LZMA ratio | 5 |
+| **G3** Bit-level randomness | NIST SP 800-22 p-values: frequency, block frequency, runs, longest run, cumulative sums (forward + backward), approximate entropy | 7 |
+| **G4** Serial dependence | byte autocorrelation at lags 1–32; bigram χ² (overlapping vs. uniform, non-overlapping vs. uniform, adjacent-byte independence) | 35 |
+| **G5** Block structure | for b ∈ {8, 16}: repeated aligned blocks, distinct blocks, mean Hamming distance between consecutive blocks; plus an inferred block size | 7 |
+
+Total: **315 features**. The NIST tests are implemented in `features.py` with numpy/scipy (no extra package).
+If a NIST test is not applicable (sequence too short) its p-value is set to 0.5.
+
+**Model:** `CipherClassifier` now has two branches – the original byte-sequence branch
+(embedding → Conv1d(8/16) → Transformer) and an MLP over the features – concatenated before the
+classification head.
+
+**Leakage safety:** features are z-scored with mean/std of the *training* subset only
+(`Dataset.standardize_features`), so in Scenario B nothing about the test keys leaks in.
+The scaler and feature names are saved to `outputs/scenario_*/feature_scaler.npz` / `feature_names.json`.
+
+**Switches (`config.py`):**
+
+```python
+'USE_STAT_FEATURES': True,                        # False -> original byte-only model
+'FEATURE_GROUPS': ['G1', 'G2', 'G3', 'G4', 'G5'], # drop groups for ablation studies
+'USE_BYTE_SEQUENCE': True,                        # False -> statistical features only
+```
+
+Notes: G5's "inferred block size" is a heuristic (largest candidate in {4, 8, 16, 32} whose
+repeated-block fraction is ≥ half that of the smallest repeating candidate; 0 = no repeats found).
+Ciphertext produced by CBC/CTR/stream ciphers with random-looking output normally yields 0.
+Existing `model_best.pth` checkpoints are incompatible with the new architecture; re-train.

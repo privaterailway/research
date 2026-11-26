@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import os
-from math import ceil
 
 from loguru import logger as log
 from tqdm import tqdm
@@ -12,9 +11,7 @@ from os.path import join, isdir
 DATASET_DIR = '_dataset'
 QUANTITY = 1024  # Количество шифротекста на каждый класс
 TEXT_SIZE = 1024  # Размер текста в байтах
-KEY_REUSE_EVERY = 8  # One key is shared by this many consecutive samples of a class (key group = `key_id`)
-KEY_SIZE = 32  # bytes; every encoder truncates to the size it needs
-IV_SIZE = 16  # bytes; every encoder truncates to the size it needs
+UPDATE_IV_AND_KEY_EVERY = 8  # Каждые n раз обновляем ключ и IV
 
 
 def parse_args():
@@ -46,8 +43,12 @@ def main():
     if not isdir(DATASET_DIR):
         mkdir(DATASET_DIR)
 
-    # One IV for the whole dataset (same as the original setup)
-    IV = os.urandom(IV_SIZE)
+    # Генерация текстов
+    TEXTS = list([i.to_bytes(TEXT_SIZE, byteorder="big") for i in range(QUANTITY)])
+
+    # Генерация ключа
+    KEYS = list([os.urandom(32) for _ in range(QUANTITY // UPDATE_IV_AND_KEY_EVERY)])
+    IV = os.urandom(16)
 
     for enc_name in selected:
         enc_factory = ENCODER_FACTORY[enc_name]
@@ -62,23 +63,18 @@ def main():
         if not isdir(dir_path):
             mkdir(dir_path)
 
+        # Generate texts
         encoder = enc_factory()
 
-        # Key material is generated INDEPENDENTLY for every cipher (nothing is shared between
-        # classes) and a key is only shared inside one key group of this class.
-        keys = [os.urandom(KEY_SIZE) for _ in range(ceil(QUANTITY / KEY_REUSE_EVERY))]
-
         for i in tqdm(range(QUANTITY), desc=f"[{enc_name}] Generating", unit="item"):
-            key_id = i // KEY_REUSE_EVERY
+            text = TEXTS[i]
 
-            # A fresh random plaintext for every sample and every cipher: samples are neither
-            # shared between classes nor structured (the old counter plaintext was ~all zeros).
-            text = os.urandom(TEXT_SIZE)
+            key_id = i // UPDATE_IV_AND_KEY_EVERY
 
-            encoder.generate(keys[key_id], IV)
+            encoder.generate(KEYS[key_id], IV) # Генерируем ключ и IV на основе одних их тех же данных
             ciphertext = encoder.encrypt(text)
 
-            # Save the ciphertext (only the key group id is stored in the file name)
+            # Сохраняем зашифрованные данные в файл
             with open(join(dir_path, f"{i + 1}_key{key_id}.bin"), "wb") as f:
                 f.write(ciphertext)
 
